@@ -46,7 +46,7 @@ STUDENT ANSWER:
 ---
 
 AI SCORE:
-{ai_score}/10
+{ai_score}
 
 AI BREAKDOWN (JSON):
 {json.dumps(ai_breakdown, indent=2)}
@@ -54,7 +54,7 @@ AI BREAKDOWN (JSON):
 ---
 
 HUMAN SCORE:
-{human_score}/10
+{human_score}
 
 HUMAN FEEDBACK (JSON):
 {json.dumps(human_feedback, indent=2)}

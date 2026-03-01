@@ -31,7 +31,8 @@ Your task:
 3. State where AI did better than human
 4. State where human judgment was superior
 5. Give a final verdict on AI reliability
-6. Rate the AI grading quality out of 10
+6. Your score to student
+7. Rate the AI grading quality out of 10
 
 ---
 

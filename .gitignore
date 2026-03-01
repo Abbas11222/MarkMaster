@@ -1,8 +1,9 @@
 # Virtual environments
-myenv_3/
-venv/
-.env/
-ENV/
+myenv_3
+venv
+.env
+model_answer/
+student_answer/
 
 # Python bytecode
 __pycache__/

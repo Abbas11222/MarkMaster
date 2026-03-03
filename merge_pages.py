@@ -1,22 +1,36 @@
 """
-merge_pages.py — with debug tracing to find where Q3 disappears.
+merge_pages.py
+
+Key rule: pages are uploaded in sequence.
+When a page has TWO questions (end of Q2 + start of Q3):
+  - Content BEFORE the new label  → appended to PREVIOUS question (CONTINUATION)
+  - Content FROM the new label    → goes into new question bucket
+
+text_extracr.py handles this split via Pass 1 (find label positions) +
+Pass 2 (boundary-aware extraction), producing blocks labelled either
+CONTINUATION or the actual question ID.
 """
 
 import re
 
 
-def normalize_qid(qid):
+def normalize_qid(qid: str) -> str:
     numbers = re.findall(r'\d+', str(qid))
-    if numbers:
-        return f"Q{int(numbers[0])}"
-    return str(qid).strip().upper()
+    return f"Q{int(numbers[0])}" if numbers else str(qid).strip().upper()
 
 
-def is_default_fallback(qid):
-    return str(qid).strip().upper() in ("Q1", "CONTINUATION")
+def _has_content(parts: list) -> bool:
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        for st in part.get("sub_topics", []):
+            if isinstance(st, dict):
+                if st.get("topic", "").strip() or st.get("content", "").strip():
+                    return True
+    return False
 
 
-def merge_parts_into(target_q, new_parts):
+def _merge_parts_into(target_q: dict, new_parts: list):
     for part in new_parts:
         if not isinstance(part, dict):
             continue
@@ -25,16 +39,13 @@ def merge_parts_into(target_q, new_parts):
             continue
         if not sub_topics and not part.get("content", "").strip():
             continue
-
-        existing = None
-        for ep in target_q["parts"]:
-            if ep.get("part_id") == part.get("part_id", "main"):
-                existing = ep
-                break
-
+        part_id  = part.get("part_id", "main")
+        existing = next(
+            (p for p in target_q["parts"] if p.get("part_id") == part_id), None
+        )
         if existing is None:
             target_q["parts"].append({
-                "part_id":    part.get("part_id", "main"),
+                "part_id":    part_id,
                 "topic":      part.get("topic", ""),
                 "content":    part.get("content", ""),
                 "sub_topics": list(sub_topics)
@@ -43,14 +54,34 @@ def merge_parts_into(target_q, new_parts):
             existing["sub_topics"].extend(sub_topics)
 
 
-def merge_extractions(extracted_pages, debug=True):
+def _new_bucket(qid: str, title: str = "") -> dict:
+    return {"question_id": qid, "question_title": title, "parts": []}
+
+
+def merge_extractions(extracted_pages: list, debug: bool = True) -> list:
     """
-    Merges per-page extractions into one dict per question.
-    debug=True prints a trace of every decision made.
+    Merge per-page extractions into one bucket per question.
+
+    Three page patterns handled:
+      A) Full page = one question             → simple merge into bucket
+      B) Full page = no label (continuation)  → append to previous question
+      C) Mid-page boundary (two questions)    → text_extracr already split it:
+            CONTINUATION block  → appended to prev question
+            New Q label block   → new question bucket
     """
-    merged     = {}
-    page_order = []
+    merged     = {}   # qid → bucket dict
+    page_order = []   # insertion order for output
     prev_qid   = None
+
+    def ensure_bucket(qid, title=""):
+        if qid not in merged:
+            merged[qid] = _new_bucket(qid, title)
+            page_order.append(qid)
+            if debug:
+                print(f"    [bucket] Created '{qid}'")
+        else:
+            if not merged[qid]["question_title"] and title:
+                merged[qid]["question_title"] = title
 
     for page_idx, page in enumerate(extracted_pages):
         if not isinstance(page, dict):
@@ -61,101 +92,77 @@ def merge_extractions(extracted_pages, debug=True):
 
         if not isinstance(questions, list) or not questions:
             if debug:
-                print(f"  [merge] {source}: no questions found — skipping")
+                print(f"[merge] {source}: no questions — skip")
             continue
 
         if debug:
-            qids_on_page = [q.get("question_id", "?") for q in questions]
-            print(f"  [merge] {source}: questions on page = {qids_on_page}, prev_qid = {prev_qid}")
+            ids = [q.get("question_id", "?") for q in questions]
+            print(f"\n[merge] {source}: ids={ids}  prev_qid={prev_qid}")
 
-        # ── Detect pure continuation page ──────────────────────────
-        if len(questions) == 1:
-            q      = questions[0]
-            raw_id = str(q.get("question_id", "Q1")).strip().upper()
-            title  = q.get("question_title", "").strip()
-
-            if raw_id in ("CONTINUATION", "Q1") and not title and prev_qid:
-                if debug:
-                    print(f"    → {source}: single default page, reassigning to prev_qid={prev_qid}")
-                questions[0]["question_id"] = prev_qid
-
-        # ── Process each question on this page ──────────────────────
         for q in questions:
             if not isinstance(q, dict):
                 continue
 
             raw_id = str(q.get("question_id", "Q1")).strip().upper()
             title  = q.get("question_title", "").strip()
-            parts  = q.get("parts", [])
+            parts  = q.get("parts", []) if isinstance(q.get("parts"), list) else []
 
-            # Count sub_topics to know if there's real content
-            total_subtopics = sum(
-                len(p.get("sub_topics", [])) for p in parts
-                if isinstance(p, dict)
-            )
-
-            # ── Resolve target question ID ─────────────────────────
+            # ── CASE 1: CONTINUATION ──────────────────────────────
+            # text_extracr labels content ABOVE a new question label
+            # as CONTINUATION. It belongs to the previous question.
             if raw_id == "CONTINUATION":
                 target = prev_qid if prev_qid else "Q1"
                 if debug:
-                    print(f"    → CONTINUATION → assigned to {target} ({total_subtopics} subtopics)")
+                    print(f"  CONTINUATION → appending to '{target}'")
+                ensure_bucket(target)
+                _merge_parts_into(merged[target], parts)
+                # Do NOT change prev_qid — CONTINUATION is not a new question
 
+            # ── CASE 2: Q1 default fallback (no label found) ─────
+            # Extractor defaults to Q1 when it finds no question label.
+            # If we already know prev_qid, this is just more content
+            # for the current question.
             elif raw_id == "Q1" and not title and prev_qid and prev_qid != "Q1":
                 target = prev_qid
                 if debug:
-                    print(f"    → Q1 (default, no title) → assigned to prev_qid={target} ({total_subtopics} subtopics)")
+                    print(f"  Q1(default, no title) → appending to '{target}'")
+                ensure_bucket(target)
+                _merge_parts_into(merged[target], parts)
+                # Do NOT change prev_qid
 
+            # ── CASE 3: Real explicit question label ──────────────
+            # Q2, Q3, Question 4, etc. → new or existing bucket.
+            # Always update prev_qid so future pages know where we are.
             else:
-                target = normalize_qid(raw_id)
+                target   = normalize_qid(raw_id)
+                prev_qid = target          # update FIRST so CONTINUATION on
+                                           # the NEXT page knows this question
                 if debug:
-                    print(f"    → {raw_id} → normalized to {target} ({total_subtopics} subtopics)")
+                    print(f"  {raw_id} → '{target}'  (prev_qid updated)")
+                ensure_bucket(target, title)
+                _merge_parts_into(merged[target], parts)
 
-            # ── Initialize or update bucket ────────────────────────
-            if target not in merged:
-                merged[target] = {
-                    "question_id":    target,
-                    "question_title": title or "",
-                    "parts":          []
-                }
-                page_order.append(target)
-                if debug:
-                    print(f"    → Created new bucket for {target}")
-            else:
-                if not merged[target]["question_title"] and title:
-                    merged[target]["question_title"] = title
-                if debug:
-                    print(f"    → Merging into existing bucket {target}")
-
-            # ── Merge content ──────────────────────────────────────
-            merge_parts_into(merged[target], parts)
-
-            # ── Update prev_qid ────────────────────────────────────
-            # Only update for real explicit IDs (not CONTINUATION or default Q1)
-            if raw_id not in ("CONTINUATION",):
-                real = normalize_qid(raw_id) if raw_id != "Q1" else "Q1"
-                if raw_id != "Q1" or title:
-                    prev_qid = real
-                    if debug:
-                        print(f"    → prev_qid updated to {prev_qid}")
-
-    # ── Summary ────────────────────────────────────────────────────
+    # ── Debug summary ─────────────────────────────────────────────
     if debug:
-        print(f"\n  [merge] Final buckets:")
+        print(f"\n[merge] Final buckets:")
         for qid in page_order:
-            total = sum(
+            total_st = sum(
                 len(p.get("sub_topics", []))
                 for p in merged[qid]["parts"]
+                if isinstance(p, dict)
             )
-            print(f"    {qid}: {total} subtopics, parts={len(merged[qid]['parts'])}")
+            print(f"  {qid}: {len(merged[qid]['parts'])} parts, {total_st} sub_topics")
 
-    # ── Build output ───────────────────────────────────────────────
+    # ── Build output — skip empty buckets ─────────────────────────
     result = []
     for qid in page_order:
-        q_data = merged[qid]
-        if not q_data["parts"]:
+        bucket = merged[qid]
+        if not _has_content(bucket["parts"]):
             if debug:
-                print(f"  [merge] WARNING: {qid} has no parts — skipping")
+                print(f"[merge] WARNING: '{qid}' has no content — skipped")
             continue
-        result.append({"questions": [q_data]})
+        result.append({"questions": [bucket]})
 
     return result
+
+

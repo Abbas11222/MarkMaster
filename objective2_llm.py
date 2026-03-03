@@ -26,13 +26,14 @@ You are given:
 - Human examiner score and feedback
 
 Your task:
-1. Judge who is more justified
+1. Judge unbaisedly who is more justified , Human or AI Grading System
 2. Identify agreement and disagreement
 3. State where AI did better than human
 4. State where human judgment was superior
 5. Give a final verdict on AI reliability
-6. Your score to student
+6. Your score to student answer wrt model answer
 7. Rate the AI grading quality out of 10
+8. Structured Analysis of AI Grading System	and Human Examiner
 
 ---
 

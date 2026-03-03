@@ -85,6 +85,11 @@ def flatten_topic(topic, parent_id, weight, components, question_id, part_id,
         })
 
     for i, s in enumerate(subs, 1):
+        # If a sub_topic has no heading (e.g. came from a CONTINUATION merge),
+        # infer a short label from the first few words of its content
+        if not s.get("topic", "").strip() and s.get("content", "").strip():
+            s = dict(s)
+            s["topic"] = f"Topic {i}"
         flatten_topic(
             s,
             f"{parent_id}.S{i}",

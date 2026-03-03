@@ -32,7 +32,12 @@ def normalize_qid(qid):
 
 PASS1_PROMPT = """
 Look at this handwritten exam paper image.
-Find all question number labels (e.g. "Answer 04", "Q3", "Question 2").
+Find all question number labels (e.g. "Answer 04", "Q3", "Question 2", "{ Answer 03 }").
+
+Divide the page into THREE equal horizontal zones:
+  - top    = upper third  (0% to 33%)
+  - middle = middle third (33% to 66%)
+  - bottom = lower third  (66% to 100%)
 
 Return ONLY this JSON:
 {
@@ -41,8 +46,10 @@ Return ONLY this JSON:
   ]
 }
 
-position = "top" if in upper half, "bottom" if in lower half.
-If NO label found → return: { "labels": [] }
+Rules:
+- position must be exactly one of: "top", "middle", "bottom"
+- Include ALL question labels you can find, not just the first one
+- If NO label found → return: { "labels": [] }
 """
 
 
@@ -51,35 +58,62 @@ If NO label found → return: { "labels": [] }
 # =====================================================
 
 def build_pass2_prompt(labels):
+    # Position sort order: top=0, middle=1, bottom=2
+    pos_order = {"top": 0, "middle": 1, "bottom": 2}
+
     if not labels:
         boundary_instruction = """
-This page has NO question label. Use question_id "CONTINUATION" for ALL content.
+This page has NO question label.
+Assign question_id "CONTINUATION" to ALL content on this page.
 """
     elif len(labels) == 1:
         qid = labels[0]["question_id"]
         pos = labels[0]["position"]
-        if pos == "bottom":
+        if pos == "top":
             boundary_instruction = f"""
-Label "{qid}" is in the BOTTOM half.
-- Content ABOVE the label → question_id "CONTINUATION"
-- Content FROM label downward → question_id "{qid}"
-Create TWO objects if there is content above the label, otherwise ONE.
+The "{qid}" label is at the TOP of the page.
+All content belongs to {qid}.
+Create ONE question object: question_id = "{qid}".
 """
         else:
+            # middle or bottom means content exists ABOVE the label
             boundary_instruction = f"""
-Label "{qid}" is at the TOP. All content belongs to {qid}.
-Create ONE question object.
+The "{qid}" label appears in the {pos} of the page.
+Content ABOVE the label belongs to the PREVIOUS question.
+
+Create EXACTLY TWO question objects:
+  1. question_id: "CONTINUATION"  — everything ABOVE the "{qid}" label
+  2. question_id: "{qid}"         — the label and everything BELOW it
+
+Include even a single line or formula above the label as CONTINUATION.
+Do NOT merge everything into {qid}.
 """
     else:
-        sorted_labels = sorted(labels, key=lambda x: 0 if x["position"] == "top" else 1)
-        desc = "\n".join(f'  - "{l["question_id"]}" at {l["position"]}' for l in sorted_labels)
+        sorted_labels = sorted(labels, key=lambda x: pos_order.get(x["position"], 1))
+        first_pos = sorted_labels[0]["position"]
+        desc = "\n".join(
+            f'  - "{l["question_id"]}" label is in the {l["position"]} of the page'
+            for l in sorted_labels
+        )
         qids = [l["question_id"] for l in sorted_labels]
+
+        if first_pos == "top":
+            before_note = "No content exists above the first label."
+            objects_needed = ", ".join(qids)
+        else:
+            before_note = (
+                f'Content above the first label ("{sorted_labels[0]["question_id"]}")'
+                ' must be assigned question_id "CONTINUATION".'
+            )
+            objects_needed = "CONTINUATION, " + ", ".join(qids)
+
         boundary_instruction = f"""
-Multiple labels found:
+Multiple question labels on this page:
 {desc}
-Assign content to the question it appears UNDER.
-Content before first label → "CONTINUATION".
-Create separate objects for: {", ".join(qids)}.
+
+{before_note}
+Split content by which label it falls under.
+Create these question objects in order: {objects_needed}.
 """
 
     return f"""

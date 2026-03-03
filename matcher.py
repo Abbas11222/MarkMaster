@@ -231,8 +231,6 @@ def score_student_answer(
     2. Topic-level (50%): each model topic vs best matching student topic
        Uses adaptive BERTScore+embedding blend
        Falls back to embedding when BERTScore is low
-
-    3. Coverage: keyword presence check
     """
     if not model_components:
         return 0.0, []
@@ -254,8 +252,12 @@ def score_student_answer(
 
     valid_model = [
         m for m in model_components
-        if m.get("text", "").strip() and m.get("topic", "").strip()
+        if m.get("text", "").strip()   # keep components with content even if topic name is empty
     ]
+    # Give unnamed components a display label so they appear in breakdown
+    for m in valid_model:
+        if not m.get("topic", "").strip():
+            m["topic"] = f"Additional Content ({m.get('id', '')})"
 
     if not valid_model:
         return 0.0, []

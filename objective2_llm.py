@@ -1,12 +1,6 @@
 import os
 import json
-from groq import Groq
-from dotenv import load_dotenv
-
-load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
+from config import groq_client as client, LLM_MODEL as MODEL_NAME
 
 
 def compare_ai_with_human(
@@ -17,6 +11,14 @@ def compare_ai_with_human(
     human_score,
     human_feedback
 ):
+    total_marks = sum(
+        item.get("marks_available", 0)
+        for item in ai_breakdown
+        if item.get("topic") == "Overall Answer"
+    ) or max(
+        (item.get("marks_available", 0) for item in ai_breakdown), default=10
+    )
+
     prompt = f"""
 You are an academic moderation system.
 You are given:
@@ -26,14 +28,12 @@ You are given:
 - Human examiner score and feedback
 
 Your task:
-1. Judge unbaisedly who is more justified , Human or AI Grading System
+1. Based strictly on the model answer and student answer content, determine which score is more accurate — the AI score or the human score. Support your decision with specific evidence only.
 2. Identify agreement and disagreement
 3. State where AI did better than human
 4. State where human judgment was superior
 5. Give a final verdict on AI reliability
-6. Your score to student answer wrt model answer
-7. Rate the AI grading quality out of 10
-8. Structured Analysis of AI Grading System	and Human Examiner
+6. Rate the AI grading quality out of 10
 
 ---
 
@@ -63,13 +63,13 @@ HUMAN FEEDBACK (JSON):
 
 ---
 
-Return a structured, clear academic analysis.
+Return a structured, evidence-based academic analysis.
 """
-    
+
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
+        temperature=0.0   # zero temperature = no creativity, pure analysis
     )
 
     return response.choices[0].message.content

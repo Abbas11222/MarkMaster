@@ -1,9 +1,34 @@
-streamlit
-groq
-python-dotenv
-sentence-transformers
-scikit-learn
-torch
-numpy
-pillow
-bert-score
+# ─────────────────────────────────────────────
+# MarkMaster — Requirements
+# ─────────────────────────────────────────────
+
+# UI
+streamlit>=1.35.0
+
+# LLM API
+groq>=0.9.0
+
+# Sentence Embeddings (used in matcher.py + vector_store.py)
+sentence-transformers>=2.7.0
+
+# BERTScore (used in matcher.py)
+bert-score>=0.3.13
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# ─────────────────────────────────────────────
+# RAG dependencies
+# ─────────────────────────────────────────────
+
+# Vector database (local, no server needed)
+chromadb>=0.5.0
+
+# PDF loading (loader.py)
+pymupdf>=1.24.0
+
+# Word document loading (loader.py)
+python-docx>=1.1.0
+
+# PowerPoint loading (loader.py)
+python-pptx>=0.6.23

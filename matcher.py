@@ -4,30 +4,7 @@ import torch
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from bert_score import BERTScorer
-from sentence_transformers import SentenceTransformer
-
-logging.getLogger("transformers").setLevel(logging.ERROR)
-warnings.filterwarnings("ignore")
-
-# =====================================================
-# LOAD MODELS ONCE
-# BERTScorer      → token-level, best for similar structure
-# SentenceTransformer → sentence-level, best for different structure
-# =====================================================
-
-print("[matcher] Loading BERTScorer (one-time)...")
-_scorer = BERTScorer(
-    model_type="distilbert-base-uncased",   # 40% faster than roberta-large, still accurate
-    lang="en",
-    rescale_with_baseline=False,             # baseline not available for distilbert, skip it
-    device="cuda" if torch.cuda.is_available() else "cpu"
-)
-print("[matcher] BERTScorer ready.")
-
-print("[matcher] Loading SentenceTransformer (one-time)...")
-_embedder = SentenceTransformer("all-MiniLM-L6-v2")
-print("[matcher] SentenceTransformer ready.")
+from config import embedder as _embedder, bert_scorer as _scorer
 
 
 # =====================================================
@@ -231,6 +208,8 @@ def score_student_answer(
     2. Topic-level (50%): each model topic vs best matching student topic
        Uses adaptive BERTScore+embedding blend
        Falls back to embedding when BERTScore is low
+
+    3. Coverage: keyword presence check
     """
     if not model_components:
         return 0.0, []

@@ -6,7 +6,18 @@ from objective_2 import flatten_text
 from objective2_llm import compare_ai_with_human
 from question_groupby import group_by_question
 from merge_pages import merge_extractions
+import os
 from upload_pics import prepare_upload_folder, clear_temp_folder, folder_has_images
+
+# RAG imports
+try:
+    from loader import load_file
+    from chunker import chunk_pages
+    from vector_store import store_chunks, clear_knowledge_base, get_kb_stats
+    from rag_answer_builder import build_all_model_answers
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
 
 DEFAULT_MODEL_FOLDER   = "model_answer"
 DEFAULT_STUDENT_FOLDER = "student_answer"
@@ -367,6 +378,11 @@ defaults = {
     "model_by_q": {}, "student_by_q": {}, "total_marks_used": 10.0,
     "model_pages_count": 0, "student_pages_count": 0,
     "model_q_count": 0, "student_q_count": 0,
+    # RAG state
+    "mode": "classic",             # "classic" or "rag"
+    "kb_built": False,             # knowledge base ready
+    "rag_questions": {},           # { "Q1": "question text", ... }
+    "rag_model_answer": None,      # synthesized model answer from RAG
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -390,61 +406,294 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — UPLOAD
+# MODE SELECTOR
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="step-header">
-  <div class="step-num">1</div>
-  <div class="step-title">Upload Answer Sheets</div>
+  <div class="step-num">⚙</div>
+  <div class="step-title">Grading Mode</div>
   <div class="step-line"></div>
 </div>
 """, unsafe_allow_html=True)
 
-col1, col2 = st.columns(2, gap="large")
+mode_col1, mode_col2 = st.columns(2, gap="large")
+with mode_col1:
+    if st.button("📄  Classic Mode — Upload Model Answer Images",
+                 use_container_width=True,
+                 type="primary" if st.session_state.mode == "classic" else "secondary"):
+        st.session_state.mode = "classic"
+        st.rerun()
+with mode_col2:
+    if st.button("🧠  RAG Mode — Grade from Course Materials",
+                 use_container_width=True,
+                 type="primary" if st.session_state.mode == "rag" else "secondary"):
+        st.session_state.mode = "rag"
+        st.rerun()
 
-with col1:
+st.markdown(
+    f'<div style="font-size:0.72rem;color:rgba(255,255,255,0.3);margin:0.5rem 0 2rem;text-align:center">'
+    f'Current mode: <strong style="color:#f0c060">{"Classic" if st.session_state.mode == "classic" else "RAG — Knowledge Base"}</strong>'
+    f'</div>',
+    unsafe_allow_html=True
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAG MODE — KNOWLEDGE BASE BUILDER
+# ─────────────────────────────────────────────────────────────────────────────
+if st.session_state.mode == "rag" and RAG_AVAILABLE:
+
+    # ── Step R1: Upload course materials ──
     st.markdown("""
-    <div class="upload-label">
-      <span class="upload-icon-badge">📄</span>
-      Model Answer — reference pages
+    <div class="step-header">
+      <div class="step-num">R1</div>
+      <div class="step-title">Upload Course Materials</div>
+      <div class="step-line"></div>
     </div>
     """, unsafe_allow_html=True)
-    model_uploads = st.file_uploader(
-        "model_answer", type=["png","jpg","jpeg"],
-        accept_multiple_files=True, label_visibility="collapsed",
-        help="Upload all pages of the model/correct answer in order"
+
+    st.markdown(
+        '<div style="font-size:0.78rem;color:rgba(255,255,255,0.4);margin-bottom:1rem">'
+        'Upload textbooks, slides, notes, or any course material. '
+        'Supported: PDF, DOCX, PPTX, TXT, JPG, PNG</div>',
+        unsafe_allow_html=True
     )
-    if model_uploads:
+
+    kb_uploads = st.file_uploader(
+        "kb_files",
+        type=["pdf", "docx", "pptx", "txt", "jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+        help="Upload all course materials — the system will build a searchable knowledge base from them"
+    )
+
+    if kb_uploads:
         st.markdown(
-            f'<div class="file-count-badge">✓ {len(model_uploads)} '
-            f'page{"s" if len(model_uploads)>1 else ""} ready</div>',
+            f'<div class="file-count-badge">✓ {len(kb_uploads)} file(s) ready</div>',
             unsafe_allow_html=True
         )
 
-with col2:
-    st.markdown("""
-    <div class="upload-label">
-      <span class="upload-icon-badge">✍️</span>
-      Student Answer — pages to grade
-    </div>
-    """, unsafe_allow_html=True)
-    student_uploads = st.file_uploader(
-        "student_answer", type=["png","jpg","jpeg"],
-        accept_multiple_files=True, label_visibility="collapsed",
-        help="Upload all pages of the student's handwritten answer"
-    )
-    if student_uploads:
+    kb_stats = get_kb_stats()
+    if kb_stats > 0:
         st.markdown(
-            f'<div class="file-count-badge">✓ {len(student_uploads)} '
-            f'page{"s" if len(student_uploads)>1 else ""} ready</div>',
+            f'<div style="font-size:0.72rem;color:#4ade80;margin-top:0.5rem">'
+            f'✅ Knowledge base: <strong>{kb_stats} chunks</strong> stored</div>',
             unsafe_allow_html=True
         )
 
-# Validate uploads and show clear guidance
-if model_uploads and not student_uploads:
-    st.info("📋 Model answer uploaded. Now upload the student's answer pages to continue.")
-elif student_uploads and not model_uploads:
-    st.info("📋 Student answer uploaded. Now upload the model answer pages to continue.")
+    kb_col1, kb_col2 = st.columns([2, 1], gap="large")
+    with kb_col1:
+        build_kb = st.button(
+            "🧠  Build Knowledge Base" if kb_uploads else "⬆️  Upload files above",
+            use_container_width=True,
+            disabled=not kb_uploads
+        )
+    with kb_col2:
+        if st.button("🗑️  Clear Knowledge Base", use_container_width=True):
+            clear_knowledge_base()
+            st.session_state.kb_built = False
+            st.session_state.rag_model_answer = None
+            st.success("Knowledge base cleared.")
+            st.rerun()
+
+    if build_kb and kb_uploads:
+        import tempfile, shutil
+        tmp_dir = tempfile.mkdtemp(prefix="mm_kb_")
+        all_chunks = []
+
+        with st.spinner("Processing files and building knowledge base..."):
+            for uf in kb_uploads:
+                # Save uploaded file to temp
+                fpath = os.path.join(tmp_dir, uf.name)
+                with open(fpath, "wb") as f:
+                    f.write(uf.getbuffer())
+                pages  = load_file(fpath)
+                chunks = chunk_pages(pages)
+                all_chunks.extend(chunks)
+
+            n_stored = store_chunks(all_chunks)
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        st.session_state.kb_built = True
+        st.success(f"✅ Knowledge base built — {n_stored} new chunks stored from {len(kb_uploads)} file(s).")
+        st.rerun()
+
+    # ── Step R2: Enter exam questions ──
+    st.markdown("""
+    <div class="step-header">
+      <div class="step-num">R2</div>
+      <div class="step-title">Enter Exam Questions</div>
+      <div class="step-line"></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="font-size:0.78rem;color:rgba(255,255,255,0.4);margin-bottom:1rem">'
+        'Type each exam question. The system will retrieve relevant content from the '
+        'knowledge base and generate a model answer for each.</div>',
+        unsafe_allow_html=True
+    )
+
+    n_questions = st.number_input(
+        "Number of questions", min_value=1, max_value=10, value=2, step=1
+    )
+
+    questions_dict = {}
+    for i in range(1, int(n_questions) + 1):
+        q_text = st.text_area(
+            f"Question {i}",
+            placeholder=f"e.g. Explain formal methods in software engineering...",
+            key=f"rag_q_{i}",
+            height=80
+        )
+        if q_text.strip():
+            questions_dict[f"Q{i}"] = q_text.strip()
+
+    gen_col, _ = st.columns([1, 2])
+    with gen_col:
+        kb_ready = get_kb_stats() > 0
+        gen_answers = st.button(
+            "🔍  Generate Model Answers from KB" if kb_ready else "⚠️  Build knowledge base first",
+            use_container_width=True,
+            disabled=not kb_ready or not questions_dict
+        )
+
+    if gen_answers and questions_dict and kb_ready:
+        with st.spinner("Retrieving relevant content and generating model answers..."):
+            rag_papers = build_all_model_answers(questions_dict)
+
+        if rag_papers:
+            st.session_state.rag_model_answer = rag_papers
+            st.session_state.rag_questions    = questions_dict
+
+            # Preview generated model answers
+            st.markdown("---")
+            st.markdown(
+                '<div style="font-size:0.78rem;color:#4ade80;margin-bottom:1rem">'
+                '✅ Model answers generated. Review below before grading:</div>',
+                unsafe_allow_html=True
+            )
+            for paper in rag_papers:
+                for q in paper.get("questions", []):
+                    qid    = q.get("question_id", "")
+                    qtitle = q.get("question_title", "")
+                    with st.expander(f"📋 {qid} — {qtitle}"):
+                        for part in q.get("parts", []):
+                            for sub in part.get("sub_topics", []):
+                                st.markdown(f"**{sub['topic']}**")
+                                st.markdown(
+                                    f'<div style="font-size:0.8rem;color:rgba(255,255,255,0.6);'
+                                    f'padding:0.5rem 0 1rem">{sub["content"]}</div>',
+                                    unsafe_allow_html=True
+                                )
+                        # Show source files used
+                        sources = paper.get("source_files", [])
+                        if sources:
+                            st.markdown(
+                                f'<div style="font-size:0.65rem;color:rgba(255,255,255,0.25)">'
+                                f'Sources: {", ".join(sources)}</div>',
+                                unsafe_allow_html=True
+                            )
+        else:
+            st.error("Could not generate model answers. Check your knowledge base has relevant content.")
+
+elif st.session_state.mode == "rag" and not RAG_AVAILABLE:
+    st.warning("RAG dependencies not installed. Run: `pip install chromadb pymupdf python-docx python-pptx`")
+    st.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 — UPLOAD STUDENT ANSWER
+# ─────────────────────────────────────────────────────────────────────────────
+is_rag_mode      = st.session_state.mode == "rag"
+rag_answer_ready = is_rag_mode and st.session_state.get("rag_model_answer") is not None
+model_uploads    = None   # default — only used in classic mode
+
+# In RAG mode: skip Step 1 entirely until KB + model answer are ready
+if is_rag_mode and not rag_answer_ready:
+    st.markdown(
+        '<div style="padding:1.2rem;background:rgba(255,255,255,0.02);'
+        'border:1px dashed rgba(255,255,255,0.08);border-radius:13px;'
+        'font-size:0.78rem;color:rgba(255,255,255,0.25);text-align:center;margin-bottom:1.5rem">'
+        '⬆️ Complete steps R1 and R2 above to unlock student upload</div>',
+        unsafe_allow_html=True
+    )
+    student_uploads = None
+
+else:
+    step_title = "Upload Student Answer" if is_rag_mode else "Upload Answer Sheets"
+    st.markdown(f"""
+    <div class="step-header">
+      <div class="step-num">1</div>
+      <div class="step-title">{step_title}</div>
+      <div class="step-line"></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if is_rag_mode:
+        # RAG mode — student upload only, full width
+        st.markdown("""
+        <div class="upload-label">
+          <span class="upload-icon-badge">✍️</span>
+          Student Answer — pages to grade
+        </div>
+        """, unsafe_allow_html=True)
+        student_uploads = st.file_uploader(
+            "student_answer", type=["png","jpg","jpeg"],
+            accept_multiple_files=True, label_visibility="collapsed",
+            help="Upload all pages of the student's handwritten answer"
+        )
+        if student_uploads:
+            st.markdown(
+                f'<div class="file-count-badge">✓ {len(student_uploads)} '
+                f'page{"s" if len(student_uploads)>1 else ""} ready</div>',
+                unsafe_allow_html=True
+            )
+
+    else:
+        # Classic mode — two columns: model + student
+        col1, col2 = st.columns(2, gap="large")
+        with col1:
+            st.markdown("""
+            <div class="upload-label">
+              <span class="upload-icon-badge">📄</span>
+              Model Answer — reference pages
+            </div>
+            """, unsafe_allow_html=True)
+            model_uploads = st.file_uploader(
+                "model_answer", type=["png","jpg","jpeg"],
+                accept_multiple_files=True, label_visibility="collapsed",
+                help="Upload all pages of the model/correct answer in order"
+            )
+            if model_uploads:
+                st.markdown(
+                    f'<div class="file-count-badge">✓ {len(model_uploads)} '
+                    f'page{"s" if len(model_uploads)>1 else ""} ready</div>',
+                    unsafe_allow_html=True
+                )
+        with col2:
+            st.markdown("""
+            <div class="upload-label">
+              <span class="upload-icon-badge">✍️</span>
+              Student Answer — pages to grade
+            </div>
+            """, unsafe_allow_html=True)
+            student_uploads = st.file_uploader(
+                "student_answer", type=["png","jpg","jpeg"],
+                accept_multiple_files=True, label_visibility="collapsed",
+                help="Upload all pages of the student's handwritten answer"
+            )
+            if student_uploads:
+                st.markdown(
+                    f'<div class="file-count-badge">✓ {len(student_uploads)} '
+                    f'page{"s" if len(student_uploads)>1 else ""} ready</div>',
+                    unsafe_allow_html=True
+                )
+        # Classic mode guidance
+        if model_uploads and not student_uploads:
+            st.info("📋 Model answer uploaded. Now upload the student's answer pages.")
+        elif student_uploads and not model_uploads:
+            st.info("📋 Student answer uploaded. Now upload the model answer pages.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -486,8 +735,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-ready = bool(model_uploads or folder_has_images(DEFAULT_MODEL_FOLDER)) and \
-        bool(student_uploads or folder_has_images(DEFAULT_STUDENT_FOLDER))
+ready = (
+    bool(student_uploads or folder_has_images(DEFAULT_STUDENT_FOLDER)) and
+    (
+        bool(model_uploads or folder_has_images(DEFAULT_MODEL_FOLDER))  # classic
+        or rag_answer_ready                                               # rag
+    )
+)
 
 run_col, _ = st.columns([1, 2])
 with run_col:
@@ -532,17 +786,29 @@ if run and ready:
         steps_placeholder.markdown(html, unsafe_allow_html=True)
 
     show_steps(0)
-    model_folder   = prepare_upload_folder(model_uploads,   "model_")   if model_uploads   else DEFAULT_MODEL_FOLDER
+    if not is_rag_mode:
+        model_folder = prepare_upload_folder(model_uploads, "model_") if model_uploads else DEFAULT_MODEL_FOLDER
+    else:
+        model_folder = None
     student_folder = prepare_upload_folder(student_uploads, "student_") if student_uploads else DEFAULT_STUDENT_FOLDER
 
     show_steps(1)
     with st.spinner("Extracting text from images (this takes a moment)..."):
-        model_pages    = process_folder(model_folder)
-        student_pages  = process_folder(student_folder)
+        # In RAG mode: use pre-generated model answer, only OCR student pages
+        if is_rag_mode and rag_answer_ready:
+            model_pages   = st.session_state.rag_model_answer  # already in paper format
+            student_pages = process_folder(student_folder)
+        else:
+            model_pages   = process_folder(model_folder)
+            student_pages = process_folder(student_folder)
 
     show_steps(2)
-    model_answer   = merge_extractions(model_pages)
-    student_answer = merge_extractions(student_pages)
+    if is_rag_mode and rag_answer_ready:
+        model_answer   = model_pages   # RAG output is already merged format
+        student_answer = merge_extractions(student_pages)
+    else:
+        model_answer   = merge_extractions(model_pages)
+        student_answer = merge_extractions(student_pages)
     model_q_count   = sum(len(m.get("questions",[])) for m in model_answer)
     student_q_count = sum(len(s.get("questions",[])) for s in student_answer)
 
@@ -587,7 +853,8 @@ if run and ready:
     if unmatched:
         st.warning(f"No student answer found for: **{', '.join(unmatched)}**. These questions scored 0.")
 
-    clear_temp_folder(model_folder)
+    if model_folder:
+        clear_temp_folder(model_folder)
     clear_temp_folder(student_folder)
     st.rerun()
 

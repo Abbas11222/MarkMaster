@@ -5,12 +5,7 @@ import glob
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dotenv import load_dotenv
-from groq import Groq
-
-load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
+from config import groq_client as client, LLM_MODEL as MODEL_NAME
 
 
 def encode_image(image_path):
@@ -199,10 +194,11 @@ def extract_content_from_image(image_path, max_retries=3):
     filename = os.path.basename(image_path)
 
     # ── PASS 1: Find labels ───────────────────────────
+    # Uses a smaller/faster model — task is simple (just find label positions)
     labels = []
     try:
         res1 = client.chat.completions.create(
-            model=MODEL_NAME,
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{"role": "user", "content": [
                 {"type": "text",      "text": PASS1_PROMPT},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}}

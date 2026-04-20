@@ -21,8 +21,15 @@ python-dotenv>=1.0.0
 # RAG dependencies
 # ─────────────────────────────────────────────
 
-# Vector database (local, no server needed)
-chromadb>=0.5.0
+# Vector database — pinned to 0.4.24 to avoid opentelemetry gRPC crash
+# on Streamlit Cloud (chromadb>=0.5 pulls broken opentelemetry-exporter-otlp-proto-grpc)
+chromadb==0.4.24
+
+# Pin opentelemetry stack that chromadb 0.4.24 depends on — prevents TypeError on import
+opentelemetry-api==1.23.0
+opentelemetry-sdk==1.23.0
+opentelemetry-exporter-otlp-proto-grpc==1.23.0
+opentelemetry-instrumentation-fastapi==0.44b0
 
 # PDF loading (loader.py)
 pymupdf>=1.24.0
@@ -32,3 +39,5 @@ python-docx>=1.1.0
 
 # PowerPoint loading (loader.py)
 python-pptx>=0.6.23
+
+numpy<2.0

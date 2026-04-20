@@ -5,26 +5,20 @@ Stores chunks in ChromaDB (local, no server needed).
 Retrieves top-k most relevant chunks for a given query.
 
 DB is stored in ./chroma_db/ folder — persists between runs.
+Uses chromadb >= 0.5.x PersistentClient API.
 """
 
 import os
+import chromadb
 from config import embedder as _embedder_model
-
-# ── Lazy ChromaDB import (installed separately) ──
-try:
-    import chromadb
-    from chromadb.config import Settings
-    CHROMA_AVAILABLE = True
-except ImportError:
-    CHROMA_AVAILABLE = False
-    print("  ⚠️ ChromaDB not installed. Run: pip install chromadb")
-
 
 CHROMA_DIR      = "./chroma_db"
 COLLECTION_NAME = "markmaster_kb"
 
-_chroma_client     = None
-_collection = None
+_chroma_client = None
+_collection    = None
+
+CHROMA_AVAILABLE = True  # chromadb is a hard requirement
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -38,8 +32,6 @@ def _get_embedder():
 def _get_collection():
     global _chroma_client, _collection
     if _collection is None:
-        if not CHROMA_AVAILABLE:
-            raise RuntimeError("ChromaDB not installed. Run: pip install chromadb")
         os.makedirs(CHROMA_DIR, exist_ok=True)
         _chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
         _collection = _chroma_client.get_or_create_collection(
@@ -61,16 +53,15 @@ def store_chunks(chunks):
     collection = _get_collection()
     embedder   = _get_embedder()
 
-    # Get existing IDs to avoid duplicates
-    existing = set(collection.get()["ids"])
-
+    existing   = set(collection.get()["ids"])
     new_chunks = [c for c in chunks if c["chunk_id"] not in existing]
+
     if not new_chunks:
         print("  ℹ️ All chunks already in knowledge base — skipping")
         return 0
 
-    texts    = [c["text"]     for c in new_chunks]
-    ids      = [c["chunk_id"] for c in new_chunks]
+    texts     = [c["text"]     for c in new_chunks]
+    ids       = [c["chunk_id"] for c in new_chunks]
     metadatas = [{
         "source":      c["source"],
         "page":        c["page"],
@@ -81,7 +72,6 @@ def store_chunks(chunks):
     print(f"  🔄 Embedding {len(new_chunks)} chunks...")
     embeddings = embedder.encode(texts, show_progress_bar=True).tolist()
 
-    # ChromaDB batch limit is 5000
     batch_size = 500
     for i in range(0, len(new_chunks), batch_size):
         collection.add(
@@ -97,24 +87,21 @@ def store_chunks(chunks):
 
 def clear_knowledge_base():
     """Delete all stored chunks — full reset."""
-    global _collection
-    if not CHROMA_AVAILABLE:
-        return
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    global _collection, _chroma_client
     try:
+        client = chromadb.PersistentClient(path=CHROMA_DIR)
         client.delete_collection(COLLECTION_NAME)
-        _collection = None
+        _collection    = None
+        _chroma_client = None
         print("  🗑️ Knowledge base cleared")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠️ Could not clear knowledge base: {e}")
 
 
 def get_kb_stats():
     """Return how many chunks are stored."""
     try:
-        collection = _get_collection()
-        count      = collection.count()
-        return count
+        return _get_collection().count()
     except Exception:
         return 0
 
@@ -152,7 +139,7 @@ def retrieve(query, top_k=6):
             "text":   doc,
             "source": meta.get("source", ""),
             "page":   meta.get("page", 0),
-            "score":  round(1 - dist, 4)   # cosine distance → similarity
+            "score":  round(1 - dist, 4)
         })
 
     return chunks
